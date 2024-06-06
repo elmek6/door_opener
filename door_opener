@@ -1,0 +1,367 @@
+//kapida takili olan -> Duemilanove or Diecimila with Optiboot (hizlandirilmis Bootloader)
+
+#include <avr/sleep.h>
+#include <MobaTools.h>
+
+#define debugPrint(a)    // (Serial.print(a))
+#define debugPrintln(a)  // (Serial.print(a))
+
+#define motorPin1 6  // IN1 on ULN2003 ==> Blue on 28BYJ-48
+#define motorPin2 7  // IN2 on ULN2003 ==> Pink on 28BYJ-48
+#define motorPin3 8  // IN3 on ULN2003 ==> Yellow on 28BYJ-48
+#define motorPin4 9  // IN4 on ULN2003 ==> Orange on 28BYJ-48
+
+#define HOME_PIN 2  // persist for interrupt pin
+#define LED_EXT_PIN 3
+#define BUZZER_PIN 4
+
+enum Operation { open,
+                 lock,
+                 success,
+                 fail,
+                 starting };
+
+const long oneGrad = 60;         // 5:1 ~  60 // 4.5:1 ~ 55
+const long magnet_length = 100;  // 5:1 ~ 100 // 4.5:1 ~ 90
+
+//Relatif degerler home ile pozisyonlandiktan sonra konum kac derece ilerde
+// const long pos_lock = oneGrad * 360;  // kapi nerede kilitleniyor
+// const long pos_open = oneGrad * 37;   // where unlock is
+// const long pos_park = oneGrad * 200;  // manyet ile anahtar serberst arasindaki fark (isareti pos_open ile ayni olsun)
+
+int acc_step = 100;        // hizlanma, yavaslama kac adim sürecek
+int hi_speed = 300;       // dakikadaki tur sayisi * 10
+int lo_speed = 100;        // motoru yavaslatrip torku artirmak icin
+bool enable_home = true;  // kesme ile ev pozisyonunu bulma (sanki her kosuldu stabil degil)
+bool found_home = false;  // islem sonucu
+
+MoToStepper Step1(4076);  // HALFSTEP is default bazi kaynaklarda 4008 bazilarinda 4076,
+
+void energize(bool state) {
+  if (state) {
+    Step1.attach(motorPin4, motorPin3, motorPin2, motorPin1);  // saat yönü + olsun
+    Step1.setSpeed(hi_speed);
+    Step1.setRampLen(acc_step);
+    Step1.setZero();  // Referenzpunkt für Motor 1 setzen
+  } else {
+    Step1.detach();  // motora giden enerjiyi kes
+  }
+}
+
+void setup() {
+#ifdef debug
+  Serial.begin(9600);
+#endif
+  debugPrint("9600 READY");
+  pinMode(HOME_PIN, INPUT_PULLUP);
+  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(LED_EXT_PIN, OUTPUT);
+  homeInterrupt();
+  attachInterrupt(digitalPinToInterrupt(HOME_PIN), homeInterrupt, CHANGE);
+}
+
+
+// Falling ve rising durumlarinda geciste hep tutarli degil, tekrar kontrol etmek lazim
+// oysa digitalRead(HOME_PIN) hep tutarli sonuc verdi. Daha cok test gerekli! **1
+void homeInterrupt() {
+  if (enable_home) {
+    found_home = !digitalRead(HOME_PIN);
+    debugPrint("LED Home Interrupt:");
+    debugPrintln(found_home);
+    digitalWrite(LED_BUILTIN, found_home);
+    enable_home = false;
+  }
+}
+
+
+void loop() {
+  // digitalWrite(LED_BUILTIN, HIGH);
+  playToneAndWait(starting);
+#ifdef debug
+  debugMode();
+#else
+  energize(true);
+  job_open();
+  energize(false);
+  detachInterrupt(digitalPinToInterrupt(HOME_PIN));
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+  sleep_mode();
+  while (true) {}  //bir sekilde islemci uyuyamazsa burada takili kalsin
+#endif
+}
+
+/// step: gidilecek mesafe
+/// slowRate: lo_speed ile yavas gidilecek son yüzde
+/// hareket halindeyken manyet üzerinden gecilirse sonuc true döner
+bool motion(long step, int slowRate = 0) {
+  bool result = false;
+  enable_home = true;
+  long slowDistance = slowRate > 0 ? abs(step) * slowRate / 100 : 0;  // sifira böle hatasini engelle
+
+  Step1.doSteps(step);
+  while (Step1.distanceToGo() != 0) {
+
+    // bi kere aktif olmali, bu kodda sürekli setSpeed cagriliyor!
+    if (slowRate != 0 && Step1.distanceToGo() <= slowDistance) {
+      long newSpeed = hi_speed * (100 - slowRate) / 100;
+      Step1.setSpeed(lo_speed);
+    }
+    if (!result && !digitalRead(2)) {  // found_home
+      debugPrint("MOTION GERCEKLESIRKEN MANYET AKTIF OLDU");
+      result = true;
+    }
+  }
+  //Hizi düsürülmüsse geri artir
+  if (slowRate > 0) Step1.setSpeed(hi_speed);
+  debugPrint("motion  :");
+  debugPrintln(step);
+  return result;
+}
+
+/// limit ile verilen deger icerisinde manyete ulasmaya calisir
+/// manyet bulunursa sonuc olarka kac adimda ulasildi döner
+/// limit degeri icerisinde manyet bulunmazsa -1 döner
+/// manyet üzerinde ise 0 dönmeli (stabil degil, home okumak daha dogru)
+long motion_home(long limit) {
+  enable_home = true;
+
+  if (found_home) debugPrintln("BI BAH BI");
+  long result = 0;
+  Step1.doSteps(limit);
+  while (Step1.distanceToGo() != 0) {
+    result++;
+    if (found_home) {
+      debugPrint("motion_home limit      :");
+      debugPrintln(limit);
+      debugPrint("motion_home kalan adim :");
+      debugPrintln(Step1.distanceToGo());
+      Step1.stop();
+      break;
+    }
+  }
+  if (!found_home) {
+    debugPrintln("motion_home! home bulunamadi");
+    return -1;
+  }
+  digitalWrite(LED_BUILTIN, HIGH);
+  return result;
+}
+
+/// manyeti, limit kadar arar. Bulduktan sonra step degeri kadar gider.
+/// slowRate (%0 ... %100) orani ile yavaslayarak biter,
+/// eger home bulunamazsa false dönderir
+bool motionAfterHome(long step, long limit, int slowRate = 0) {
+  enable_home = true;
+  bool result = true;
+  long homeSteps = 0;  //debug icin, manyete ulasana kadar gecen adim
+  bool searching_home = true;
+  bool slowingDown = slowRate > 0;
+  long slowDistance = slowRate > 0 ? abs(step) * slowRate / 100 : 0;  // sifira böle hatasini engelle
+  step = step * oneGrad;
+  limit = limit * oneGrad;
+
+  Step1.doSteps(step + limit);
+  while (Step1.distanceToGo() != 0) {
+    if (searching_home) {
+      homeSteps++;
+      if (!digitalRead(2)) {
+        // play(1000, 50, 50); //forDebug
+        debugPrint("HOME icin harcanan adim: ");
+        debugPrintln(homeSteps);
+        searching_home = false;
+        Step1.doSteps(step);  //manyet bulundu, yeni gidilecek adim
+      }
+    }
+    if (slowingDown) {
+      if (Step1.distanceToGo() <= slowDistance) {
+        long newSpeed = hi_speed * (100 - slowRate) / 100;  // Yeni hızı hesapla
+        Step1.setSpeed(lo_speed);                           // Hızı ayarla
+        slowingDown = false;
+      }
+    }
+  }
+  if (slowRate > 0) {
+    Step1.setSpeed(hi_speed);  //Hizi eski haline getir
+  }
+  if (searching_home) {
+    debugPrint("motion_after_home! manyet hic okunmadi");
+    result = false;
+  }
+
+  return result;
+}
+
+
+// Manyet bitene kadar git
+long leave_magnet(long limit) {
+  enable_home = true;
+  if (!found_home) {
+    debugPrint("MAGNET ÜSTÜNDE DEGIL");
+    return -1;
+  }
+  long result = 0;
+  Step1.doSteps(limit);
+  while (Step1.distanceToGo() != 0) {
+    result++;
+    if (digitalRead(2)) {  // **1 homeInterrupt !found_home hic durmuyor???
+      debugPrintln("kalan adim");
+      debugPrintln(Step1.distanceToGo());
+      Step1.stop();
+      break;
+    }
+  }
+  debugPrint("leave Home Count: ");
+  debugPrintln(result);
+  return result;
+}
+
+/// Manyet üzeriysen kapi kilitleme istegi
+/// Manyet üzerinde degilsen kilidi ac
+void job_auto() {
+    /*  enable_home = true;  
+  //manyet üzerindeyse hata var 2000 geri gel
+  if (found_home) {
+    debugPrintln("EV TRUE");  // manyet üzerinde
+    motion(2000);
+  }
+
+  long res = motion_home(-max_steps_for_home);
+  if (res != -1) {
+    motion(pos_open, 25);
+    playToneAndWait(open);
+
+    //kilit acildi, tekrar home yap, ata olursa 2 saniye bekle tekrar home dene
+    if (motion_home(max_steps_for_home) == -1) {
+      delay(2000);
+      motion_home(max_steps_for_home);
+      return;
+    }
+  }
+  motion(pos_park);
+  playToneAndWait(success);
+  */
+}
+
+/// Kapiyi ac
+void job_open() {
+  if (motionAfterHome(-37, -200, 30)) {  // 200°+37° boyunca acmayi dene
+    playToneAndWait(open);
+  } else {
+    playToneAndWait(fail);
+  }
+  if (motionAfterHome(45, 15)) {  // her halükarda 45°+17° ile normal anahtari serbest pozisyona getir
+    playToneAndWait(success);
+  } else {
+    playToneAndWait(fail);
+  }
+}
+
+/// Kapiyi kilitle
+void job_lock() {
+}
+
+void play(int frequency, int duration, long delayTime) {
+  noTone(BUZZER_PIN);
+  tone(BUZZER_PIN, frequency, duration);
+  while (delayTime >= 200) {
+    digitalWrite(LED_EXT_PIN, HIGH);
+    delay(100);
+    digitalWrite(LED_EXT_PIN, LOW);
+    delay(100);
+    delayTime -= 200;
+  }
+  delay(delayTime);
+}
+
+void playToneAndWait(Operation toneType) {
+  digitalWrite(LED_EXT_PIN, HIGH);
+  switch (toneType) {
+    case starting:
+      play(1000, 50, 20);
+      break;
+    case open:
+      play(880, 200, 1000);
+      play(880, 150, 1000);
+      break;
+    case lock:
+      play(440, 200, 1000);
+      play(349, 200, 1000);
+      play(258, 200, 1000);
+      break;
+    case success:
+      play(880, 250, 250);
+      break;
+    case fail:
+      play(523, 500, 750);
+      play(523, 500, 750);
+      play(523, 500, 750);
+      break;
+  }
+  digitalWrite(LED_EXT_PIN, LOW);
+}
+
+void debugMode() {
+  if (Serial.available() > 0) {
+    char incomingByte = Serial.read();
+    switch (incomingByte) {
+      case '-':
+        debugPrintln("-----");
+        energize(true);
+        motion(-500);
+        energize(false);
+        break;
+      case 'a':
+        Step1.write(0);  // 1 Umdrehung zur�ck
+        digitalWrite(LED_BUILTIN, LOW);
+        break;
+      case 'o':
+        energize(true);
+        job_open();
+        energize(false);
+        break;
+      case 'c':
+        energize(true);
+        job_lock();
+        energize(false);
+        break;
+      case '+':
+        energize(true);
+        motion(500);
+        energize(false);
+        break;
+      case 'd':
+        energize(true);
+        leave_magnet(500);
+        motion_home(oneGrad * 360);
+        energize(false);
+        break;
+      case 't':
+        enable_home = true;
+        if (found_home) {
+          debugPrintln("EV TRUE");
+        } else {
+          debugPrintln("EV FALSE");
+        }
+        break;
+      case 'z':
+        Step1.write(360);  // 1 Umdrehung zur�ck
+        break;
+      case 'Z':
+        Step1.rotate(1);
+        Step1.setZero();
+        break;
+      case 'h':
+        energize(true);
+        motion_home(-25000);
+        energize(false);
+        break;
+      case 'H':
+        energize(true);
+        motion_home(25000);
+        energize(false);
+        break;
+      default:
+        break;
+    }
+  }
+}
