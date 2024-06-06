@@ -1,0 +1,132 @@
+#include <TuyaWifi.h>
+
+#define debugPrint(a)    // (Serial.print(a))
+#define debugPrintln(a)  // (Serial.print(a))
+
+#define LO_PIN 5     // persist for interrupt pin
+#define HI_PIN 6     // persist for interrupt pin
+#define S1_PIN 7     // leak sensor 1
+#define S2_PIN 8     // leak sensor 2
+#define BUZZER_PIN  9
+#define VALVE_PIN   10  // sebeke vanasi
+#define DRAIN_PIN   11  // su bosaltma
+#define LED_EXT_PIN 12  //13 build in olmali
+
+const long relayTime = 20*1000;         //vana acilmasi saniye
+const long alarmTime = 24;              //sesli alarm süresi saat
+
+
+enum Operation { open,
+                 lock,
+                 success,
+                 fail,
+                 starting };
+
+bool enable_home = true;  // kesme ile ev pozisyonunu bulma (sanki her kosuldu stabil degil)
+bool found_home = false;  // islem sonucu
+void homeInterrupt() {
+  if (enable_home) {
+    found_home = !digitalRead(LO_PIN);
+    debugPrint("LED Home Interrupt:");
+    debugPrintln(found_home);
+    digitalWrite(LED_BUILTIN, found_home);
+    enable_home = false;
+  }
+}
+
+void setup() {
+#ifdef debugPrint
+  Serial.begin(9600);
+#endif
+  debugPrint("9600 READY");
+  pinMode(LO_PIN, INPUT_PULLUP);
+  pinMode(HI_PIN, INPUT_PULLUP);
+  pinMode(S0_PIN, INPUT_PULLUP);
+  pinMode(S1_PIN, INPUT_PULLUP);
+  pinMode(S2_PIN, INPUT_PULLUP);
+  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(LED_EXT_PIN, OUTPUT);
+  homeInterrupt();
+  attachInterrupt(digitalPinToInterrupt(LO_PIN), homeInterrupt, CHANGE);
+}
+
+void loop() {
+  // digitalWrite(LED_BUILTIN, HIGH);
+  playToneAndWait(starting);
+#ifdef debugPrint
+  debugMode();
+#else  
+
+  if (LO_PIN == HIGH)
+    {drenaj(true);}
+  else
+    {drenaj(false);}
+
+  if (HI_PIN == HIGH) {
+    drenaj(true);
+    valf(false);
+  }
+
+  if (S0 == HIGH || S1 == HIGH) {
+    drenaj(true);
+    valf(false);
+  }
+#endif
+}
+
+void play(int frequency, int duration, long delayTime) {
+  noTone(BUZZER_PIN);
+  tone(BUZZER_PIN, frequency, duration);
+  while (delayTime >= 200) {
+    digitalWrite(LED_EXT_PIN, HIGH);
+    delay(100);
+    digitalWrite(LED_EXT_PIN, LOW);
+    delay(100);
+    delayTime -= 200;
+  }
+  delay(delayTime);
+}
+
+void playToneAndWait(Operation toneType) {
+  digitalWrite(LED_EXT_PIN, HIGH);
+  switch (toneType) {
+    case starting:
+      play(1000, 50, 20);
+      break;
+    case open:
+      play(880, 200, 1000);
+      play(880, 150, 1000);
+      break;
+    case lock:
+      play(440, 200, 1000);
+      play(349, 200, 1000);
+      play(258, 200, 1000);
+      break;
+    case success:
+      play(880, 250, 250);
+      break;
+    case fail:
+      play(523, 500, 750);
+      play(523, 500, 750);
+      play(523, 500, 750);
+      break;
+  }
+  digitalWrite(LED_EXT_PIN, LOW);
+}
+
+
+void debugMode() {
+  if (Serial.available() > 0) {
+    char incomingByte = Serial.read();
+    switch (incomingByte) {
+      case '-':
+        debugPrintln("-----");        
+        break;
+      case 'a':        
+        digitalWrite(LED_BUILTIN, LOW);
+        break;
+      default:
+        break;
+    }
+  }
+}
