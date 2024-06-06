@@ -11,6 +11,11 @@
 #define motorPin3 8  // IN3 on ULN2003 ==> Yellow on 28BYJ-48
 #define motorPin4 9  // IN4 on ULN2003 ==> Orange on 28BYJ-48
 
+#define LED_G 10
+#define LED_O 11
+#define LED_R 12
+
+
 #define HOME_PIN 2  // persist for interrupt pin
 #define LED_EXT_PIN 3
 #define BUZZER_PIN 4
@@ -29,9 +34,9 @@ const long magnet_length = 100;  // 5:1 ~ 100 // 4.5:1 ~ 90
 // const long pos_open = oneGrad * 37;   // where unlock is
 // const long pos_park = oneGrad * 200;  // manyet ile anahtar serberst arasindaki fark (isareti pos_open ile ayni olsun)
 
-int acc_step = 100;        // hizlanma, yavaslama kac adim sürecek
+int acc_step = 100;       // hizlanma, yavaslama kac adim sürecek
 int hi_speed = 300;       // dakikadaki tur sayisi * 10
-int lo_speed = 100;        // motoru yavaslatrip torku artirmak icin
+int lo_speed = 100;       // motoru yavaslatrip torku artirmak icin
 bool enable_home = true;  // kesme ile ev pozisyonunu bulma (sanki her kosuldu stabil degil)
 bool found_home = false;  // islem sonucu
 
@@ -56,6 +61,9 @@ void setup() {
   pinMode(HOME_PIN, INPUT_PULLUP);
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(LED_EXT_PIN, OUTPUT);
+  pinMode(LED_G, OUTPUT);
+  pinMode(LED_O, OUTPUT);
+  pinMode(LED_R, OUTPUT);
   homeInterrupt();
   attachInterrupt(digitalPinToInterrupt(HOME_PIN), homeInterrupt, CHANGE);
 }
@@ -179,6 +187,7 @@ bool motionAfterHome(long step, long limit, int slowRate = 0) {
         slowingDown = false;
       }
     }
+    WarningSignal(step > 0);
   }
   if (slowRate > 0) {
     Step1.setSpeed(hi_speed);  //Hizi eski haline getir
@@ -187,7 +196,6 @@ bool motionAfterHome(long step, long limit, int slowRate = 0) {
     debugPrint("motion_after_home! manyet hic okunmadi");
     result = false;
   }
-
   return result;
 }
 
@@ -218,7 +226,7 @@ long leave_magnet(long limit) {
 /// Manyet üzeriysen kapi kilitleme istegi
 /// Manyet üzerinde degilsen kilidi ac
 void job_auto() {
-    /*  enable_home = true;  
+  /*  enable_home = true;  
   //manyet üzerindeyse hata var 2000 geri gel
   if (found_home) {
     debugPrintln("EV TRUE");  // manyet üzerinde
@@ -245,19 +253,45 @@ void job_auto() {
 /// Kapiyi ac
 void job_open() {
   if (motionAfterHome(-37, -200, 30)) {  // 200°+37° boyunca acmayi dene
+    digitalWrite(LED_O, HIGH);
+    digitalWrite(LED_G, HIGH);
     playToneAndWait(open);
   } else {
+    digitalWrite(LED_R, HIGH);
     playToneAndWait(fail);
   }
+
+  digitalWrite(LED_O, LOW);
+  digitalWrite(LED_G, LOW);
+
   if (motionAfterHome(45, 15)) {  // her halükarda 45°+17° ile normal anahtari serbest pozisyona getir
+    digitalWrite(LED_G, LOW);
     playToneAndWait(success);
   } else {
+    digitalWrite(LED_R, HIGH);
     playToneAndWait(fail);
   }
 }
 
 /// Kapiyi kilitle
 void job_lock() {
+}
+
+void WarningSignal(bool direction) {
+  static unsigned long previousMillis = 0; //burdan bi killandim
+  const unsigned long interval = 200;
+  unsigned long currentMillis = millis();
+
+
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
+
+    if (direction) {
+      digitalWrite(LED_G, !digitalRead(LED_G));
+    } else {
+      digitalWrite(LED_O, !digitalRead(LED_O));
+    };
+  }
 }
 
 void play(int frequency, int duration, long delayTime) {
